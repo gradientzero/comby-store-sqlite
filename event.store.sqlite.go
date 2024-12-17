@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/gradientzero/comby-store-sqlite/internal"
 	"github.com/gradientzero/comby/v2"
-	combyStore "github.com/gradientzero/comby/v2/store"
 	_ "modernc.org/sqlite"
 )
 
@@ -130,7 +130,7 @@ func (es *eventStoreSQLite) Create(ctx context.Context, opts ...comby.EventStore
 	}
 
 	// sql statement
-	dbRecord, err := combyStore.BaseEventToDbEvent(evt)
+	dbRecord, err := internal.BaseEventToDbEvent(evt)
 	if err != nil {
 		return err
 	}
@@ -208,7 +208,7 @@ func (es *eventStoreSQLite) Get(ctx context.Context, opts ...comby.EventStoreGet
 	}
 
 	// extract record
-	var dbRecord combyStore.Event
+	var dbRecord internal.Event
 	if err := row.Scan(
 		&dbRecord.ID,
 		&dbRecord.InstanceId,
@@ -232,7 +232,7 @@ func (es *eventStoreSQLite) Get(ctx context.Context, opts ...comby.EventStoreGet
 	}
 
 	// db record to event
-	evt, err := combyStore.DbEventToBaseEvent(&dbRecord)
+	evt, err := internal.DbEventToBaseEvent(&dbRecord)
 	if err != nil {
 		return nil, err
 	}
@@ -340,9 +340,9 @@ func (es *eventStoreSQLite) List(ctx context.Context, opts ...comby.EventStoreLi
 	}
 
 	// extract results
-	var dbRecords []*combyStore.Event
+	var dbRecords []*internal.Event
 	for rows.Next() {
-		var dbRecord combyStore.Event
+		var dbRecord internal.Event
 		if err := rows.Scan(
 			&dbRecord.ID,
 			&dbRecord.InstanceId,
@@ -368,7 +368,7 @@ func (es *eventStoreSQLite) List(ctx context.Context, opts ...comby.EventStoreLi
 	}
 
 	// convert
-	evts, err := combyStore.DbEventsToBaseEvents(dbRecords)
+	evts, err := internal.DbEventsToBaseEvents(dbRecords)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -397,7 +397,7 @@ func (es *eventStoreSQLite) Update(ctx context.Context, opts ...comby.EventStore
 	}
 
 	// convert to db format
-	dbRecord, err := combyStore.BaseEventToDbEvent(evt)
+	dbRecord, err := internal.BaseEventToDbEvent(evt)
 	if err != nil {
 		return err
 	}

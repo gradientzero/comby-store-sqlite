@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/gradientzero/comby-store-sqlite/internal"
 	"github.com/gradientzero/comby/v2"
-	combyStore "github.com/gradientzero/comby/v2/store"
 	_ "modernc.org/sqlite"
 )
 
@@ -123,7 +123,7 @@ func (cs *commandStoreSQLite) Create(ctx context.Context, opts ...comby.CommandS
 	}
 
 	// sql statement
-	dbRecord, err := combyStore.BaseCommandToDbCommand(cmd)
+	dbRecord, err := internal.BaseCommandToDbCommand(cmd)
 	if err != nil {
 		return err
 	}
@@ -197,7 +197,7 @@ func (cs *commandStoreSQLite) Get(ctx context.Context, opts ...comby.CommandStor
 	}
 
 	// extract record
-	var dbRecord combyStore.Command
+	var dbRecord internal.Command
 	if err := row.Scan(
 		&dbRecord.ID,
 		&dbRecord.InstanceId,
@@ -219,7 +219,7 @@ func (cs *commandStoreSQLite) Get(ctx context.Context, opts ...comby.CommandStor
 	}
 
 	// db record to command
-	cmd, err := combyStore.DbCommandToBaseCommand(&dbRecord)
+	cmd, err := internal.DbCommandToBaseCommand(&dbRecord)
 	if err != nil {
 		return nil, err
 	}
@@ -320,9 +320,9 @@ func (cs *commandStoreSQLite) List(ctx context.Context, opts ...comby.CommandSto
 	}
 
 	// extract results
-	var dbRecords []*combyStore.Command
+	var dbRecords []*internal.Command
 	for rows.Next() {
-		var dbRecord combyStore.Command
+		var dbRecord internal.Command
 		if err := rows.Scan(
 			&dbRecord.ID,
 			&dbRecord.InstanceId,
@@ -346,7 +346,7 @@ func (cs *commandStoreSQLite) List(ctx context.Context, opts ...comby.CommandSto
 	}
 
 	// convert
-	cmds, err := combyStore.DbCommandsToBaseCommands(dbRecords)
+	cmds, err := internal.DbCommandsToBaseCommands(dbRecords)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -374,7 +374,7 @@ func (cs *commandStoreSQLite) Update(ctx context.Context, opts ...comby.CommandS
 	}
 
 	// convert to db format
-	dbRecord, err := combyStore.BaseCommandToDbCommand(cmd)
+	dbRecord, err := internal.BaseCommandToDbCommand(cmd)
 	if err != nil {
 		return err
 	}

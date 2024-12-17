@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/gradientzero/comby-sqlite-store"
+	"github.com/gradientzero/comby-store-sqlite"
 	"github.com/gradientzero/comby/v2"
 )
 

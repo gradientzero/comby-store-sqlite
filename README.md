@@ -1,4 +1,4 @@
-# comby-sqlite-store
+# comby-store-sqlite
 
 Implementation of the EventStore and CommandStore interfaces defined in [comby](https://github.com/gradientzero/comby) with SQLite. **comby** is a powerful application framework designed with Event Sourcing and Command Query Responsibility Segregation (CQRS) principles, written in Go.
 
@@ -12,17 +12,17 @@ Implementation of the EventStore and CommandStore interfaces defined in [comby](
 
 ## Installation
 
-*comby-sqlite-store* supports the latest version of comby (v2), requires Go version 1.22+ and is based on SQLite driver [modernc.org/sqlite](https://gitlab.com/cznic/sqlite).
+*comby-store-sqlite* supports the latest version of comby (v2), requires Go version 1.22+ and is based on SQLite driver [modernc.org/sqlite](https://gitlab.com/cznic/sqlite).
 
 ```shell
-go get github.com/gradientzero/comby-sqlite-store
+go get github.com/gradientzero/comby-store-sqlite
 ```
 
 ## Quickstart
 
 ```go
 import (
-	"github.com/gradientzero/comby-sqlite-store"
+	"github.com/gradientzero/comby-store-sqlite"
 	"github.com/gradientzero/comby/v2"
 )
 
