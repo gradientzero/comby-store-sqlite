@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,10 +24,16 @@ type eventStoreSQLite struct {
 	path string
 }
 
-func NewEventStoreSQLite(path string) comby.EventStore {
-	return &eventStoreSQLite{
+func NewEventStoreSQLite(path string, opts ...comby.EventStoreOption) comby.EventStore {
+	es := &eventStoreSQLite{
 		path: path,
 	}
+	for _, opt := range opts {
+		if _, err := opt(&es.options); err != nil {
+			return nil
+		}
+	}
+	return es
 }
 
 func (es *eventStoreSQLite) connect(ctx context.Context) (*sql.DB, error) {
@@ -135,6 +142,13 @@ func (es *eventStoreSQLite) Create(ctx context.Context, opts ...comby.EventStore
 		return err
 	}
 
+	// encrypt domain data if crypto service is provided
+	if es.options.CryptoService != nil {
+		if err := es.encryptDomainData(dbRecord); err != nil {
+			return err
+		}
+	}
+
 	// sql begin transaction
 	tx, err := es.db.Begin()
 	if err != nil {
@@ -231,11 +245,19 @@ func (es *eventStoreSQLite) Get(ctx context.Context, opts ...comby.EventStoreGet
 		}
 	}
 
+	// decrypt domain data if crypto service is provided
+	if es.options.CryptoService != nil {
+		if err := es.decryptDomainData(&dbRecord); err != nil {
+			return nil, err
+		}
+	}
+
 	// db record to event
 	evt, err := internal.DbEventToBaseEvent(&dbRecord)
 	if err != nil {
 		return nil, err
 	}
+
 	return evt, err
 }
 
@@ -367,6 +389,15 @@ func (es *eventStoreSQLite) List(ctx context.Context, opts ...comby.EventStoreLi
 		return nil, 0, err
 	}
 
+	// decrypt domain data if crypto service is provided
+	if es.options.CryptoService != nil {
+		for _, dbRecord := range dbRecords {
+			if err := es.decryptDomainData(dbRecord); err != nil {
+				return nil, 0, err
+			}
+		}
+	}
+
 	// convert
 	evts, err := internal.DbEventsToBaseEvents(dbRecords)
 	if err != nil {
@@ -400,6 +431,13 @@ func (es *eventStoreSQLite) Update(ctx context.Context, opts ...comby.EventStore
 	dbRecord, err := internal.BaseEventToDbEvent(evt)
 	if err != nil {
 		return err
+	}
+
+	// encrypt domain data if crypto service is provided
+	if es.options.CryptoService != nil {
+		if err := es.encryptDomainData(dbRecord); err != nil {
+			return err
+		}
 	}
 
 	// sql begin transaction
@@ -644,6 +682,41 @@ func (es *eventStoreSQLite) Reset(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (es *eventStoreSQLite) encryptDomainData(dbRecord *internal.Event) error {
+	if es.options.CryptoService == nil {
+		return fmt.Errorf("'%s' failed - crypto service is nil", es.String())
+	}
+	domainData := []byte(dbRecord.DataBytes)
+	if len(domainData) < 1 {
+		return fmt.Errorf("'%s' failed - domain data is empty", es.String())
+	}
+	if encryptedData, err := es.options.CryptoService.Encrypt(domainData); err != nil {
+		return fmt.Errorf("'%s' failed - failed to encrypt domain data: %w", es.String(), err)
+	} else {
+		dbRecord.DataBytes = hex.EncodeToString(encryptedData)
+	}
+	return nil
+}
+
+func (es *eventStoreSQLite) decryptDomainData(dbRecord *internal.Event) error {
+	if es.options.CryptoService == nil {
+		return fmt.Errorf("'%s' failed - crypto service is nil", es.String())
+	}
+	encryptedData, err := hex.DecodeString(dbRecord.DataBytes)
+	if err != nil {
+		return fmt.Errorf("'%s' failed - failed to decode hex domain data: %w", es.String(), err)
+	}
+	if len(encryptedData) < 1 {
+		return fmt.Errorf("'%s' failed - encrypted domain data is empty", es.String())
+	}
+	if decryptedData, err := es.options.CryptoService.Decrypt(encryptedData); err != nil {
+		return fmt.Errorf("'%s' failed - failed to decrypt domain data: %w", es.String(), err)
+	} else {
+		dbRecord.DataBytes = string(decryptedData)
 	}
 	return nil
 }

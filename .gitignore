@@ -22,3 +22,6 @@
 
 # Go Modules
 go.sum
+
+# Other
+.DS_Store
