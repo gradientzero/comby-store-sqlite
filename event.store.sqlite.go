@@ -289,6 +289,9 @@ func (es *eventStoreSQLite) List(ctx context.Context, opts ...comby.EventStoreLi
 	if len(listOpts.AggregateUuid) > 0 {
 		whereList = append(whereList, fmt.Sprintf("aggregate_uuid='%s'", listOpts.AggregateUuid))
 	}
+	if len(listOpts.DataType) > 0 {
+		whereList = append(whereList, fmt.Sprintf("data_type='%s'", listOpts.DataType))
+	}
 	if len(listOpts.Domains) > 0 {
 		inStr := ""
 		for index, _domain := range listOpts.Domains {
