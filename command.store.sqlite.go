@@ -522,7 +522,7 @@ func (cs *commandStoreSQLite) Info(ctx context.Context) (*comby.CommandStoreInfo
 	}
 
 	// run extra total query (no args to not using prepared statement)
-	var lastEventQuery string = fmt.Sprintf("SELECT MAX(created_at) FROM commands;")
+	var lastEventQuery string = fmt.Sprintf("SELECT COALESCE(MAX(created_at), 0) FROM commands;")
 	row = cs.db.QueryRowContext(ctx, lastEventQuery)
 	if err := row.Err(); err != nil {
 		return nil, err
