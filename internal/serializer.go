@@ -27,6 +27,13 @@ func BaseEventToDbEvent(evt comby.Event) (*Event, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Get data type name, fallback to type name from DomainEvt if not set
+	dataType := evt.GetDomainEvtName()
+	if dataType == "" && evt.GetDomainEvt() != nil {
+		dataType = comby.GetTypeName(evt.GetDomainEvt())
+	}
+
 	dbEvent := &Event{
 		InstanceId:    evt.GetInstanceId(),
 		Uuid:          evt.GetEventUuid(),
@@ -36,7 +43,7 @@ func BaseEventToDbEvent(evt comby.Event) (*Event, error) {
 		AggregateUuid: evt.GetAggregateUuid(),
 		Version:       evt.GetVersion(),
 		CreatedAt:     evt.GetCreatedAt(),
-		DataType:      evt.GetDomainEvtName(),
+		DataType:      dataType,
 		DataBytes:     string(evtDataBytes),
 	}
 	return dbEvent, nil
@@ -82,13 +89,20 @@ func BaseCommandToDbCommand(cmd comby.Command) (*Command, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Get data type name, fallback to type name from DomainCmd if not set
+	dataType := cmd.GetDomainCmdName()
+	if dataType == "" && cmd.GetDomainCmd() != nil {
+		dataType = comby.GetTypeName(cmd.GetDomainCmd())
+	}
+
 	dbCmd := &Command{
 		InstanceId: cmd.GetInstanceId(),
 		Uuid:       cmd.GetCommandUuid(),
 		TenantUuid: cmd.GetTenantUuid(),
 		Domain:     cmd.GetDomain(),
 		CreatedAt:  cmd.GetCreatedAt(),
-		DataType:   cmd.GetDomainCmdName(),
+		DataType:   dataType,
 		DataBytes:  string(cmdDataBytes),
 		ReqCtx:     string(reqCtxBytes),
 	}
