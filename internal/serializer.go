@@ -23,9 +23,16 @@ func Deserialize(dataBytes []byte, dst interface{}) error {
 
 // helpers
 func BaseEventToDbEvent(evt comby.Event) (*Event, error) {
-	evtDataBytes, err := Serialize(evt.GetDomainEvt())
-	if err != nil {
-		return nil, err
+	var err error
+
+	// serialize event data
+	evtDataBytes := evt.GetDomainEvtBytes()
+
+	// If DomainEvt is set, re-serialize to ensure consistent serialization
+	if evt.GetDomainEvt() != nil {
+		if evtDataBytes, err = Serialize(evt.GetDomainEvt()); err != nil {
+			return nil, err
+		}
 	}
 
 	// Get data type name, fallback to type name from DomainEvt if not set
@@ -61,9 +68,10 @@ func DbEventToBaseEvent(dbEvent *Event) (comby.Event, error) {
 		Domain:         dbEvent.Domain,
 		AggregateUuid:  dbEvent.AggregateUuid,
 		Version:        dbEvent.Version,
-		CreatedAt:      dbEvent.CreatedAt,
 		DomainEvtName:  dbEvent.DataType,
 		DomainEvtBytes: []byte(dbEvent.DataBytes),
+		DomainEvt:      nil,
+		CreatedAt:      dbEvent.CreatedAt,
 	}
 	return evt, nil
 }
@@ -81,10 +89,19 @@ func DbEventsToBaseEvents(dbEvents []*Event) ([]comby.Event, error) {
 }
 
 func BaseCommandToDbCommand(cmd comby.Command) (*Command, error) {
-	cmdDataBytes, err := Serialize(cmd.GetDomainCmd())
-	if err != nil {
-		return nil, err
+	var err error
+
+	// serialize command data
+	cmdDataBytes := cmd.GetDomainCmdBytes()
+
+	// If DomainCmd is set, re-serialize to ensure consistent serialization
+	if cmd.GetDomainCmd() != nil {
+		if cmdDataBytes, err = Serialize(cmd.GetDomainCmd()); err != nil {
+			return nil, err
+		}
 	}
+
+	// serialize request context
 	reqCtxBytes, err := Serialize(cmd.GetReqCtx())
 	if err != nil {
 		return nil, err
@@ -126,9 +143,10 @@ func DbCommandToBaseCommand(dbCmd *Command) (comby.Command, error) {
 		CommandUuid:    dbCmd.Uuid,
 		TenantUuid:     dbCmd.TenantUuid,
 		Domain:         dbCmd.Domain,
-		CreatedAt:      dbCmd.CreatedAt,
 		DomainCmdName:  dbCmd.DataType,
 		DomainCmdBytes: []byte(dbCmd.DataBytes),
+		DomainCmd:      nil,
+		CreatedAt:      dbCmd.CreatedAt,
 		ReqCtx:         &reqCtx,
 	}
 	return cmd, nil
