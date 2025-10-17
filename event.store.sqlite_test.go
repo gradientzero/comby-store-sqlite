@@ -2,7 +2,10 @@ package store_test
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"testing"
+	"time"
 
 	store "github.com/gradientzero/comby-store-sqlite"
 	"github.com/gradientzero/comby/v2"
@@ -383,15 +386,12 @@ func TestEventStoreFieldLoading(t *testing.T) {
 		if len(dataBytes) == 0 {
 			t.Fatal("CRITICAL: data_bytes is empty after loading")
 		}
-		t.Logf("data_bytes length: %d bytes", len(dataBytes))
-		t.Logf("data_bytes content (first 100 chars): %s", string(dataBytes[:min(100, len(dataBytes))]))
 
 		// Verify data_type is set
 		dataType := loadedEvt.GetDomainEvtName()
 		if len(dataType) == 0 {
 			t.Fatal("CRITICAL: data_type is empty after loading")
 		}
-		t.Logf("data_type: %s", dataType)
 
 		// Deserialize and verify the domain data
 		loadedData := &ComplexDomainEvent{}
@@ -455,7 +455,6 @@ func TestEventStoreFieldLoading(t *testing.T) {
 		if len(dataBytes) == 0 {
 			t.Fatal("CRITICAL: data_bytes is empty after List()")
 		}
-		t.Logf("List - data_bytes length: %d bytes", len(dataBytes))
 
 		// Verify data_type is set
 		dataType := loadedEvt.GetDomainEvtName()
@@ -487,6 +486,197 @@ func TestEventStoreFieldLoading(t *testing.T) {
 	// close connection
 	if err := eventStore.Close(ctx); err != nil {
 		t.Fatalf("failed to close connection: %v", err)
+	}
+}
+
+// Helper function to create test events with all fields populated (except runtime fields)
+func createTestEvent(tenantUuid, domain string, version int64, createdAt int64) comby.Event {
+	evt := comby.NewBaseEvent()
+	evt.SetInstanceId(1)
+	evt.SetTenantUuid(tenantUuid)
+	evt.SetCommandUuid(fmt.Sprintf("command-%d", version))
+	evt.SetDomain(domain)
+	evt.SetAggregateUuid(fmt.Sprintf("aggregate-%d", version))
+	evt.SetVersion(version)
+	evt.SetDomainEvtName(fmt.Sprintf("TestEvent_%d", version))
+	evt.SetDomainEvtBytes([]byte(fmt.Sprintf("test-data-%d", version)))
+	evt.SetCreatedAt(createdAt)
+	return evt
+}
+
+// Test: SQLite to SQLite - Validate complete event data is copied (including DomainEvtBytes)
+// This test specifically addresses the reported issue where data_bytes are missing after copying
+// between SQLite event stores.
+func TestSyncEventStore_ValidateCompleteEventData(t *testing.T) {
+	ctx := context.Background()
+
+	// Create temporary directories for test databases
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "events-source.db")
+	destPath := filepath.Join(tmpDir, "events-dest.db")
+
+	// Create SQLite event stores
+	source := store.NewEventStoreSQLite(sourcePath)
+	destination := store.NewEventStoreSQLite(destPath)
+
+	// Initialize stores
+	if err := source.Init(ctx); err != nil {
+		t.Fatalf("Failed to init source SQLite store: %v", err)
+	}
+	defer source.Close(ctx)
+
+	if err := destination.Init(ctx); err != nil {
+		t.Fatalf("Failed to init destination SQLite store: %v", err)
+	}
+	defer destination.Close(ctx)
+
+	// Create test events with all fields populated and various data sizes
+	startTime := time.Now().Unix()
+	testEvents := []comby.Event{
+		createTestEvent("tenant-1", "user-domain", 1, startTime),
+		createTestEvent("tenant-1", "order-domain", 2, startTime+1),
+		createTestEvent("tenant-2", "product-domain", 3, startTime+2),
+		createTestEvent("tenant-2", "inventory-domain", 4, startTime+3),
+		createTestEvent("tenant-3", "payment-domain", 5, startTime+4),
+	}
+
+	// Set DomainEvtBytes with different sizes to ensure all data is copied
+	testEvents[0].SetDomainEvtBytes([]byte("small-payload"))
+	testEvents[1].SetDomainEvtBytes([]byte("medium-payload-with-more-content-for-testing"))
+	testEvents[2].SetDomainEvtBytes([]byte("large-payload-" + string(make([]byte, 500))))
+	testEvents[3].SetDomainEvtBytes([]byte(`{"type":"json","data":{"key":"value","nested":{"field":"data"}}}`))
+	testEvents[4].SetDomainEvtBytes([]byte("very-large-payload-" + string(make([]byte, 2000))))
+
+	// Additional field customization
+	testEvents[0].SetDomainEvtName("UserCreated")
+	testEvents[1].SetDomainEvtName("OrderPlaced")
+	testEvents[2].SetDomainEvtName("ProductAdded")
+	testEvents[3].SetDomainEvtName("InventoryUpdated")
+	testEvents[4].SetDomainEvtName("PaymentProcessed")
+
+	// Store all events in source
+	for i, evt := range testEvents {
+		if err := source.Create(ctx, comby.EventStoreCreateOptionWithEvent(evt)); err != nil {
+			t.Fatalf("Failed to create event %d in source SQLite store: %v", i, err)
+		}
+	}
+
+	// Verify source has all events
+	sourceTotal := source.Total(ctx)
+	if sourceTotal != int64(len(testEvents)) {
+		t.Fatalf("Source store should have %d events, got %d", len(testEvents), sourceTotal)
+	}
+
+	// Sync from SQLite source to SQLite destination
+	err := comby.SyncEventStore(ctx, source, destination)
+	if err != nil {
+		t.Fatalf("Sync from SQLite to SQLite failed: %v", err)
+	}
+
+	// Verify count matches
+	destTotal := destination.Total(ctx)
+	if sourceTotal != destTotal {
+		t.Fatalf("Event count mismatch after sync: source=%d, destination=%d", sourceTotal, destTotal)
+	}
+
+	// Retrieve all events from both stores for field-by-field comparison
+	sourceEvents, _, err := source.List(ctx, comby.EventStoreListOptionOrderBy("created_at"), comby.EventStoreListOptionAscending(true))
+	if err != nil {
+		t.Fatalf("Failed to list source events: %v", err)
+	}
+
+	destEvents, _, err := destination.List(ctx, comby.EventStoreListOptionOrderBy("created_at"), comby.EventStoreListOptionAscending(true))
+	if err != nil {
+		t.Fatalf("Failed to list destination events: %v", err)
+	}
+
+	if len(sourceEvents) != len(destEvents) {
+		t.Fatalf("Event list length mismatch: source=%d, destination=%d", len(sourceEvents), len(destEvents))
+	}
+
+	// Validate EVERY field for EVERY event
+	for i := 0; i < len(sourceEvents); i++ {
+		srcEvt := sourceEvents[i]
+		dstEvt := destEvents[i]
+
+		// Instance ID
+		if srcEvt.GetInstanceId() != dstEvt.GetInstanceId() {
+			t.Errorf("Event %d: InstanceId mismatch: source=%d, dest=%d", i, srcEvt.GetInstanceId(), dstEvt.GetInstanceId())
+		}
+
+		// Event UUID
+		if srcEvt.GetEventUuid() != dstEvt.GetEventUuid() {
+			t.Errorf("Event %d: EventUuid mismatch: source=%s, dest=%s", i, srcEvt.GetEventUuid(), dstEvt.GetEventUuid())
+		}
+
+		// Tenant UUID
+		if srcEvt.GetTenantUuid() != dstEvt.GetTenantUuid() {
+			t.Errorf("Event %d: TenantUuid mismatch: source=%s, dest=%s", i, srcEvt.GetTenantUuid(), dstEvt.GetTenantUuid())
+		}
+
+		// Command UUID
+		if srcEvt.GetCommandUuid() != dstEvt.GetCommandUuid() {
+			t.Errorf("Event %d: CommandUuid mismatch: source=%s, dest=%s", i, srcEvt.GetCommandUuid(), dstEvt.GetCommandUuid())
+		}
+
+		// Domain
+		if srcEvt.GetDomain() != dstEvt.GetDomain() {
+			t.Errorf("Event %d: Domain mismatch: source=%s, dest=%s", i, srcEvt.GetDomain(), dstEvt.GetDomain())
+		}
+
+		// Aggregate UUID
+		if srcEvt.GetAggregateUuid() != dstEvt.GetAggregateUuid() {
+			t.Errorf("Event %d: AggregateUuid mismatch: source=%s, dest=%s", i, srcEvt.GetAggregateUuid(), dstEvt.GetAggregateUuid())
+		}
+
+		// Version
+		if srcEvt.GetVersion() != dstEvt.GetVersion() {
+			t.Errorf("Event %d: Version mismatch: source=%d, dest=%d", i, srcEvt.GetVersion(), dstEvt.GetVersion())
+		}
+
+		// Domain Event Name
+		if srcEvt.GetDomainEvtName() != dstEvt.GetDomainEvtName() {
+			t.Errorf("Event %d: DomainEvtName mismatch: source=%s, dest=%s", i, srcEvt.GetDomainEvtName(), dstEvt.GetDomainEvtName())
+		}
+
+		// Created At
+		if srcEvt.GetCreatedAt() != dstEvt.GetCreatedAt() {
+			t.Errorf("Event %d: CreatedAt mismatch: source=%d, dest=%d", i, srcEvt.GetCreatedAt(), dstEvt.GetCreatedAt())
+		}
+
+		// CRITICAL TEST: DomainEvtBytes (data_bytes) - THIS IS THE REPORTED BUG!
+		srcBytes := srcEvt.GetDomainEvtBytes()
+		dstBytes := dstEvt.GetDomainEvtBytes()
+
+		// Check if bytes exist
+		if len(srcBytes) == 0 {
+			t.Errorf("Event %d: Source DomainEvtBytes is empty! This should not happen.", i)
+		}
+
+		if len(dstBytes) == 0 {
+			t.Errorf("Event %d: CRITICAL BUG - Destination DomainEvtBytes is empty! data_bytes were not copied from SQLite source.", i)
+		}
+
+		// Check length matches
+		if len(srcBytes) != len(dstBytes) {
+			t.Errorf("Event %d: DomainEvtBytes length mismatch: source=%d bytes, dest=%d bytes",
+				i, len(srcBytes), len(dstBytes))
+			t.Errorf("  Source data (first 100 chars): %q", string(srcBytes[:min(100, len(srcBytes))]))
+			if len(dstBytes) > 0 {
+				t.Errorf("  Dest data (first 100 chars): %q", string(dstBytes[:min(100, len(dstBytes))]))
+			} else {
+				t.Errorf("  Dest data: EMPTY (BUG!)")
+			}
+		}
+
+		// Check content matches byte-for-byte
+		if len(srcBytes) > 0 && len(dstBytes) > 0 {
+			if string(srcBytes) != string(dstBytes) {
+				t.Errorf("Event %d: DomainEvtBytes content mismatch!", i)
+				t.Errorf("  Source (%d bytes): %q", len(srcBytes), string(srcBytes[:min(200, len(srcBytes))]))
+				t.Errorf("  Dest (%d bytes): %q", len(dstBytes), string(dstBytes[:min(200, len(dstBytes))]))
+			}
+		}
 	}
 }
 

@@ -2,7 +2,10 @@ package store_test
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"testing"
+	"time"
 
 	store "github.com/gradientzero/comby-store-sqlite"
 	"github.com/gradientzero/comby/v2"
@@ -484,5 +487,186 @@ func TestCommandStoreFieldLoading(t *testing.T) {
 	// close connection
 	if err := commandStore.Close(ctx); err != nil {
 		t.Fatalf("failed to close connection: %v", err)
+	}
+}
+
+// Helper function to create test commands with all fields populated (except runtime fields)
+func createTestCommand(tenantUuid, domain string, createdAt int64) comby.Command {
+	cmd := comby.NewBaseCommand()
+	cmd.SetInstanceId(1)
+	cmd.SetTenantUuid(tenantUuid)
+	cmd.SetDomain(domain)
+	cmd.SetDomainCmdName(fmt.Sprintf("TestCommand_%d", createdAt))
+	cmd.SetDomainCmdBytes([]byte(fmt.Sprintf("test-data-%d", createdAt)))
+	cmd.SetCreatedAt(createdAt)
+	return cmd
+}
+
+// Helper function for min (used in test assertions)
+func minCmd(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// Test: SQLite to SQLite - Validate complete command data is copied (including DomainCmdBytes)
+// This test specifically addresses the reported issue where data_bytes are missing after copying
+// between SQLite command stores.
+func TestSyncCommandStore_ValidateCompleteCommandData(t *testing.T) {
+	ctx := context.Background()
+
+	// Create temporary directories for test databases
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "commands-source.db")
+	destPath := filepath.Join(tmpDir, "commands-dest.db")
+
+	// Create SQLite command stores
+	source := store.NewCommandStoreSQLite(sourcePath)
+	destination := store.NewCommandStoreSQLite(destPath)
+
+	// Initialize stores
+	if err := source.Init(ctx); err != nil {
+		t.Fatalf("Failed to init source SQLite store: %v", err)
+	}
+	defer source.Close(ctx)
+
+	if err := destination.Init(ctx); err != nil {
+		t.Fatalf("Failed to init destination SQLite store: %v", err)
+	}
+	defer destination.Close(ctx)
+
+	// Create test commands with all fields populated and various data sizes
+	startTime := time.Now().Unix()
+	testCommands := []comby.Command{
+		createTestCommand("tenant-1", "user-domain", startTime),
+		createTestCommand("tenant-1", "order-domain", startTime+1),
+		createTestCommand("tenant-2", "product-domain", startTime+2),
+		createTestCommand("tenant-2", "inventory-domain", startTime+3),
+		createTestCommand("tenant-3", "payment-domain", startTime+4),
+	}
+
+	// Set DomainCmdBytes with different sizes to ensure all data is copied
+	testCommands[0].SetDomainCmdBytes([]byte("small-payload"))
+	testCommands[1].SetDomainCmdBytes([]byte("medium-payload-with-more-content-for-testing"))
+	testCommands[2].SetDomainCmdBytes([]byte("large-payload-" + string(make([]byte, 500))))
+	testCommands[3].SetDomainCmdBytes([]byte(`{"type":"json","data":{"key":"value","nested":{"field":"data"}}}`))
+	testCommands[4].SetDomainCmdBytes([]byte("very-large-payload-" + string(make([]byte, 2000))))
+
+	// Additional field customization
+	testCommands[0].SetDomainCmdName("CreateUserCommand")
+	testCommands[1].SetDomainCmdName("PlaceOrderCommand")
+	testCommands[2].SetDomainCmdName("AddProductCommand")
+	testCommands[3].SetDomainCmdName("UpdateInventoryCommand")
+	testCommands[4].SetDomainCmdName("ProcessPaymentCommand")
+
+	// Store all commands in source
+	for i, cmd := range testCommands {
+		if err := source.Create(ctx, comby.CommandStoreCreateOptionWithCommand(cmd)); err != nil {
+			t.Fatalf("Failed to create command %d in source SQLite store: %v", i, err)
+		}
+	}
+
+	// Verify source has all commands
+	sourceTotal := source.Total(ctx)
+	if sourceTotal != int64(len(testCommands)) {
+		t.Fatalf("Source store should have %d commands, got %d", len(testCommands), sourceTotal)
+	}
+
+	// Sync from SQLite source to SQLite destination
+	err := comby.SyncCommandStore(ctx, source, destination)
+	if err != nil {
+		t.Fatalf("Sync from SQLite to SQLite failed: %v", err)
+	}
+
+	// Verify count matches
+	destTotal := destination.Total(ctx)
+	if sourceTotal != destTotal {
+		t.Fatalf("Command count mismatch after sync: source=%d, destination=%d", sourceTotal, destTotal)
+	}
+
+	// Retrieve all commands from both stores for field-by-field comparison
+	sourceCommands, _, err := source.List(ctx, comby.CommandStoreListOptionOrderBy("created_at"), comby.CommandStoreListOptionAscending(true))
+	if err != nil {
+		t.Fatalf("Failed to list source commands: %v", err)
+	}
+
+	destCommands, _, err := destination.List(ctx, comby.CommandStoreListOptionOrderBy("created_at"), comby.CommandStoreListOptionAscending(true))
+	if err != nil {
+		t.Fatalf("Failed to list destination commands: %v", err)
+	}
+
+	if len(sourceCommands) != len(destCommands) {
+		t.Fatalf("Command list length mismatch: source=%d, destination=%d", len(sourceCommands), len(destCommands))
+	}
+
+	// Validate EVERY field for EVERY command
+	for i := 0; i < len(sourceCommands); i++ {
+		srcCmd := sourceCommands[i]
+		dstCmd := destCommands[i]
+
+		// Instance ID
+		if srcCmd.GetInstanceId() != dstCmd.GetInstanceId() {
+			t.Errorf("Command %d: InstanceId mismatch: source=%d, dest=%d", i, srcCmd.GetInstanceId(), dstCmd.GetInstanceId())
+		}
+
+		// Command UUID
+		if srcCmd.GetCommandUuid() != dstCmd.GetCommandUuid() {
+			t.Errorf("Command %d: CommandUuid mismatch: source=%s, dest=%s", i, srcCmd.GetCommandUuid(), dstCmd.GetCommandUuid())
+		}
+
+		// Tenant UUID
+		if srcCmd.GetTenantUuid() != dstCmd.GetTenantUuid() {
+			t.Errorf("Command %d: TenantUuid mismatch: source=%s, dest=%s", i, srcCmd.GetTenantUuid(), dstCmd.GetTenantUuid())
+		}
+
+		// Domain
+		if srcCmd.GetDomain() != dstCmd.GetDomain() {
+			t.Errorf("Command %d: Domain mismatch: source=%s, dest=%s", i, srcCmd.GetDomain(), dstCmd.GetDomain())
+		}
+
+		// Domain Command Name
+		if srcCmd.GetDomainCmdName() != dstCmd.GetDomainCmdName() {
+			t.Errorf("Command %d: DomainCmdName mismatch: source=%s, dest=%s", i, srcCmd.GetDomainCmdName(), dstCmd.GetDomainCmdName())
+		}
+
+		// Created At
+		if srcCmd.GetCreatedAt() != dstCmd.GetCreatedAt() {
+			t.Errorf("Command %d: CreatedAt mismatch: source=%d, dest=%d", i, srcCmd.GetCreatedAt(), dstCmd.GetCreatedAt())
+		}
+
+		// CRITICAL TEST: DomainCmdBytes (data_bytes) - THIS IS THE REPORTED BUG!
+		srcBytes := srcCmd.GetDomainCmdBytes()
+		dstBytes := dstCmd.GetDomainCmdBytes()
+
+		// Check if bytes exist
+		if len(srcBytes) == 0 {
+			t.Errorf("Command %d: Source DomainCmdBytes is empty! This should not happen.", i)
+		}
+
+		if len(dstBytes) == 0 {
+			t.Errorf("Command %d: CRITICAL BUG - Destination DomainCmdBytes is empty! data_bytes were not copied from SQLite source.", i)
+		}
+
+		// Check length matches
+		if len(srcBytes) != len(dstBytes) {
+			t.Errorf("Command %d: DomainCmdBytes length mismatch: source=%d bytes, dest=%d bytes",
+				i, len(srcBytes), len(dstBytes))
+			t.Errorf("  Source data (first 100 chars): %q", string(srcBytes[:minCmd(100, len(srcBytes))]))
+			if len(dstBytes) > 0 {
+				t.Errorf("  Dest data (first 100 chars): %q", string(dstBytes[:minCmd(100, len(dstBytes))]))
+			} else {
+				t.Errorf("  Dest data: EMPTY (BUG!)")
+			}
+		}
+
+		// Check content matches byte-for-byte
+		if len(srcBytes) > 0 && len(dstBytes) > 0 {
+			if string(srcBytes) != string(dstBytes) {
+				t.Errorf("Command %d: DomainCmdBytes content mismatch!", i)
+				t.Errorf("  Source (%d bytes): %q", len(srcBytes), string(srcBytes[:minCmd(200, len(srcBytes))]))
+				t.Errorf("  Dest (%d bytes): %q", len(dstBytes), string(dstBytes[:minCmd(200, len(dstBytes))]))
+			}
+		}
 	}
 }
