@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gradientzero/comby-store-sqlite/internal"
 	"github.com/gradientzero/comby/v2"
@@ -42,19 +43,16 @@ func (es *eventStoreSQLite) connect(ctx context.Context) (*sql.DB, error) {
 		return nil, err
 	}
 
-	// golang database/sql driver handles internally a connection pool
-	// unfortunately, sqlite is not thread-safe. So we need to limit
-	// the number of open connections to 1
-	// Background:
-	// 1 write goroutine and many read goroutine are allowed,
-	// but tests showed that 1 write and many read goroutine are also not working
-	// so we need to limit the number of open connections to 1
-	db.SetMaxOpenConns(1)
+	// WAL mode allows concurrent readers while a single writer holds the lock.
+	// This is critical for readmodel restore where multiple goroutines read
+	// from the event store in parallel. We allow multiple connections so
+	// database/sql can serve concurrent reads without queuing.
+	db.SetMaxOpenConns(100)
 
 	// set sqlite specific pragmas
 	query := `
-	PRAGMA journal_mode=DELETE;
-	PRAGMA synchronous=FULL;
+	PRAGMA journal_mode=WAL;
+	PRAGMA synchronous=NORMAL;
 	PRAGMA foreign_keys=1;
 	PRAGMA busy_timeout=5000;
 	`
@@ -84,6 +82,12 @@ func (es *eventStoreSQLite) migrate(ctx context.Context) error {
 	);
 	CREATE INDEX IF NOT EXISTS "aggregate_uuid_index" ON "events" (
 		"aggregate_uuid" ASC
+	);
+	CREATE INDEX IF NOT EXISTS "created_at_index" ON "events" (
+		"created_at" ASC
+	);
+	CREATE UNIQUE INDEX IF NOT EXISTS "uuid_index" ON "events" (
+		"uuid" ASC
 	);
 	`
 	_, err := es.db.ExecContext(ctx, query)
@@ -154,11 +158,15 @@ func (es *eventStoreSQLite) Create(ctx context.Context, opts ...comby.EventStore
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
 
-	// prepare statement
 	query := `INSERT INTO events (
-	instance_id, 
-	uuid, 
+	instance_id,
+	uuid,
 	tenant_uuid,
 	command_uuid,
 	domain,
@@ -168,14 +176,10 @@ func (es *eventStoreSQLite) Create(ctx context.Context, opts ...comby.EventStore
 	data_type,
 	data_bytes
 ) VALUES (?,?,?,?,?,?,?,?,?,?);`
-	stmt, err := tx.Prepare(query)
-	if err != nil {
-		return err
-	}
 
-	// execute statement
-	_, err = stmt.ExecContext(
+	_, err = tx.ExecContext(
 		ctx,
+		query,
 		dbRecord.InstanceId,
 		dbRecord.Uuid,
 		dbRecord.TenantUuid,
@@ -191,13 +195,6 @@ func (es *eventStoreSQLite) Create(ctx context.Context, opts ...comby.EventStore
 		return err
 	}
 
-	// close statement
-	err = stmt.Close()
-	if err != nil {
-		return err
-	}
-
-	// commit statement
 	return tx.Commit()
 }
 
@@ -209,14 +206,14 @@ func (es *eventStoreSQLite) Get(ctx context.Context, opts ...comby.EventStoreGet
 		}
 	}
 
-	// prepare query
-	var query string = "SELECT * FROM events LIMIT 1;"
-	if len(getOpts.EventUuid) > 0 {
-		query = fmt.Sprintf("SELECT * FROM events WHERE uuid='%s' LIMIT 1;", getOpts.EventUuid)
+	if len(getOpts.EventUuid) == 0 {
+		return nil, fmt.Errorf("'%s' failed to get event - event uuid is required", es.String())
 	}
 
-	// run query (no args to not using prepared statement)
-	row := es.db.QueryRowContext(ctx, query)
+	query := `SELECT id, instance_id, uuid, tenant_uuid, command_uuid, domain,
+		aggregate_uuid, version, created_at, data_type, data_bytes
+		FROM events WHERE uuid=? LIMIT 1;`
+	row := es.db.QueryRowContext(ctx, query, getOpts.EventUuid)
 	if row.Err() != nil {
 		return nil, row.Err()
 	}
@@ -283,31 +280,34 @@ func (es *eventStoreSQLite) List(ctx context.Context, opts ...comby.EventStoreLi
 	// simply does not return the expected result after sending new values to prepared statement)
 	var whereSQL string = ""
 	var whereList []string = []string{}
+	var args []any
 	if len(listOpts.TenantUuid) > 0 {
-		whereList = append(whereList, fmt.Sprintf("tenant_uuid='%s'", listOpts.TenantUuid))
+		whereList = append(whereList, "tenant_uuid=?")
+		args = append(args, listOpts.TenantUuid)
 	}
 	if len(listOpts.AggregateUuid) > 0 {
-		whereList = append(whereList, fmt.Sprintf("aggregate_uuid='%s'", listOpts.AggregateUuid))
+		whereList = append(whereList, "aggregate_uuid=?")
+		args = append(args, listOpts.AggregateUuid)
 	}
 	if len(listOpts.DataType) > 0 {
-		whereList = append(whereList, fmt.Sprintf("data_type='%s'", listOpts.DataType))
+		whereList = append(whereList, "data_type=?")
+		args = append(args, listOpts.DataType)
 	}
 	if len(listOpts.Domains) > 0 {
-		inStr := ""
-		for index, _domain := range listOpts.Domains {
-			inStr += fmt.Sprintf("'%s'", _domain)
-			if len(listOpts.Domains) > 1 && index < len(listOpts.Domains)-1 {
-				inStr = fmt.Sprintf("%s, ", inStr)
-			}
+		placeholders := make([]string, len(listOpts.Domains))
+		for i, d := range listOpts.Domains {
+			placeholders[i] = "?"
+			args = append(args, d)
 		}
-		stmt := fmt.Sprintf("domain IN (%s)", inStr)
-		whereList = append(whereList, stmt)
+		whereList = append(whereList, fmt.Sprintf("domain IN (%s)", strings.Join(placeholders, ",")))
 	}
 	if listOpts.Before >= 0 {
-		whereList = append(whereList, fmt.Sprintf("created_at<%d", listOpts.Before))
+		whereList = append(whereList, "created_at<?")
+		args = append(args, listOpts.Before)
 	}
 	if listOpts.After >= 0 {
-		whereList = append(whereList, fmt.Sprintf("created_at>%d", listOpts.After))
+		whereList = append(whereList, "created_at>?")
+		args = append(args, listOpts.After)
 	}
 
 	// note the first empty character(s) below
@@ -322,7 +322,12 @@ func (es *eventStoreSQLite) List(ctx context.Context, opts ...comby.EventStoreLi
 	// count the total number of records for this query
 	var queryTotal int64
 	var queryTotalQuery string = fmt.Sprintf("SELECT COUNT(id) FROM events%s;", whereSQL)
-	row := es.db.QueryRowContext(ctx, queryTotalQuery)
+	var row *sql.Row
+	if len(args) > 0 {
+		row = es.db.QueryRowContext(ctx, queryTotalQuery, args...)
+	} else {
+		row = es.db.QueryRowContext(ctx, queryTotalQuery)
+	}
 	if err := row.Err(); err != nil {
 		return nil, 0, err
 	}
@@ -351,9 +356,15 @@ func (es *eventStoreSQLite) List(ctx context.Context, opts ...comby.EventStoreLi
 		offsetSQL = fmt.Sprintf(" OFFSET %d", listOpts.Offset)
 	}
 
-	// run query (no args to not using prepared statement - see above for more info)
-	var query string = fmt.Sprintf("SELECT * FROM events%s%s%s%s;", whereSQL, orderBySQL, limitSQL, offsetSQL)
-	rows, err := es.db.QueryContext(ctx, query)
+	// run query with parameterized values
+	var query string = fmt.Sprintf("SELECT id, instance_id, uuid, tenant_uuid, command_uuid, domain, aggregate_uuid, version, created_at, data_type, data_bytes FROM events%s%s%s%s;", whereSQL, orderBySQL, limitSQL, offsetSQL)
+	var rows *sql.Rows
+	var err error
+	if len(args) > 0 {
+		rows, err = es.db.QueryContext(ctx, query, args...)
+	} else {
+		rows, err = es.db.QueryContext(ctx, query)
+	}
 	switch {
 	case err == sql.ErrNoRows:
 		return nil, queryTotal, nil
@@ -448,10 +459,14 @@ func (es *eventStoreSQLite) Update(ctx context.Context, opts ...comby.EventStore
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
 
-	// prepare statement
 	query := `UPDATE events SET
-		instance_id=?, 
+		instance_id=?,
 		tenant_uuid=?,
 		command_uuid=?,
 		domain=?,
@@ -461,13 +476,9 @@ func (es *eventStoreSQLite) Update(ctx context.Context, opts ...comby.EventStore
 		data_type=?,
 		data_bytes=?
 	 WHERE uuid=?;`
-	stmt, err := tx.Prepare(query)
-	if err != nil {
-		return err
-	}
 
-	// execute statement
-	_, err = stmt.ExecContext(ctx,
+	_, err = tx.ExecContext(ctx,
+		query,
 		dbRecord.InstanceId,
 		dbRecord.TenantUuid,
 		dbRecord.CommandUuid,
@@ -482,13 +493,6 @@ func (es *eventStoreSQLite) Update(ctx context.Context, opts ...comby.EventStore
 		return err
 	}
 
-	// close statement
-	err = stmt.Close()
-	if err != nil {
-		return err
-	}
-
-	// commit statement
 	return tx.Commit()
 }
 
@@ -508,9 +512,9 @@ func (es *eventStoreSQLite) Delete(ctx context.Context, opts ...comby.EventStore
 		return fmt.Errorf("'%s' failed to delete event - event uuid '%s' is invalid", es.String(), eventUuid)
 	}
 
-	// run query (no args to not using prepared statement)
-	query := fmt.Sprintf("DELETE FROM events WHERE uuid='%s';", eventUuid)
-	_, err := es.db.ExecContext(ctx, query)
+	// run query with parameterized values
+	query := "DELETE FROM events WHERE uuid=?;"
+	_, err := es.db.ExecContext(ctx, query, eventUuid)
 	return err
 }
 
@@ -544,11 +548,14 @@ func (es *eventStoreSQLite) UniqueList(ctx context.Context, opts ...comby.EventS
 	// prepare where
 	var whereSQL string = ""
 	var whereList []string = []string{}
+	var args []any
 	if len(listOpts.TenantUuid) > 0 {
-		whereList = append(whereList, fmt.Sprintf("tenant_uuid='%s'", listOpts.TenantUuid))
+		whereList = append(whereList, "tenant_uuid=?")
+		args = append(args, listOpts.TenantUuid)
 	}
 	if len(listOpts.Domain) > 0 {
-		whereList = append(whereList, fmt.Sprintf("domain='%s'", listOpts.Domain))
+		whereList = append(whereList, "domain=?")
+		args = append(args, listOpts.Domain)
 	}
 
 	// note the first empty character(s) below
@@ -580,9 +587,15 @@ func (es *eventStoreSQLite) UniqueList(ctx context.Context, opts ...comby.EventS
 		offsetSQL = fmt.Sprintf(" OFFSET %d", listOpts.Offset)
 	}
 
-	// run query (no args to not using prepared statement)
+	// run query with parameterized values
 	var query string = fmt.Sprintf("SELECT DISTINCT %s FROM events%s%s%s%s;", listOpts.DbField, whereSQL, orderBySQL, limitSQL, offsetSQL)
-	rows, err := es.db.QueryContext(ctx, query)
+	var rows *sql.Rows
+	var err error
+	if len(args) > 0 {
+		rows, err = es.db.QueryContext(ctx, query, args...)
+	} else {
+		rows, err = es.db.QueryContext(ctx, query)
+	}
 	switch {
 	case err == sql.ErrNoRows:
 		return nil, 0, nil
@@ -609,9 +622,14 @@ func (es *eventStoreSQLite) UniqueList(ctx context.Context, opts ...comby.EventS
 		return nil, 0, err
 	}
 
-	// run extra total query (no args to not using prepared statement)
+	// run extra total query with parameterized values
 	var totalQuery string = fmt.Sprintf("SELECT COUNT(DISTINCT %s) FROM events%s;", listOpts.DbField, whereSQL)
-	row := es.db.QueryRowContext(ctx, totalQuery)
+	var row *sql.Row
+	if len(args) > 0 {
+		row = es.db.QueryRowContext(ctx, totalQuery, args...)
+	} else {
+		row = es.db.QueryRowContext(ctx, totalQuery)
+	}
 	if err := row.Err(); err != nil {
 		return nil, 0, err
 	}
@@ -639,8 +657,7 @@ func (es *eventStoreSQLite) String() string {
 func (es *eventStoreSQLite) Info(ctx context.Context) (*comby.EventStoreInfoModel, error) {
 
 	// run extra total query (no args to not using prepared statement)
-	var totalQuery string = fmt.Sprintf("SELECT COUNT(uuid) FROM events;")
-	row := es.db.QueryRowContext(ctx, totalQuery)
+	row := es.db.QueryRowContext(ctx, "SELECT COUNT(uuid) FROM events;")
 	if err := row.Err(); err != nil {
 		return nil, err
 	}
@@ -651,8 +668,7 @@ func (es *eventStoreSQLite) Info(ctx context.Context) (*comby.EventStoreInfoMode
 	}
 
 	// run extra total query (no args to not using prepared statement)
-	var lastEventQuery string = fmt.Sprintf("SELECT COALESCE(MAX(created_at), 0) FROM events;")
-	row = es.db.QueryRowContext(ctx, lastEventQuery)
+	row = es.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(created_at), 0) FROM events;")
 	if err := row.Err(); err != nil {
 		return nil, err
 	}

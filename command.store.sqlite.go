@@ -41,19 +41,13 @@ func (cs *commandStoreSQLite) connect(ctx context.Context) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	// golang database/sql driver handles internally a connection pool
-	// unfortunately, sqlite is not thread-safe. So we need to limit
-	// the number of open connections to 1
-	// Background:
-	// 1 write goroutine and many read goroutine are allowed,
-	// but tests showed that 1 write and many read goroutine are also not working
-	// so we need to limit the number of open connections to 1
-	db.SetMaxOpenConns(1)
+	// WAL mode allows concurrent readers while a single writer holds the lock.
+	db.SetMaxOpenConns(100)
 
 	// set sqlite specific pragmas
 	query := `
-		PRAGMA journal_mode=DELETE;
-		PRAGMA synchronous=FULL;
+		PRAGMA journal_mode=WAL;
+		PRAGMA synchronous=NORMAL;
 		PRAGMA foreign_keys=1;
 		PRAGMA busy_timeout=5000;
 		`
@@ -79,6 +73,12 @@ func (cs *commandStoreSQLite) migrate(ctx context.Context) error {
 	);
 	CREATE INDEX IF NOT EXISTS "tenant_index" ON "commands" (
 		"tenant_uuid" ASC
+	);
+	CREATE UNIQUE INDEX IF NOT EXISTS "uuid_index" ON "commands" (
+		"uuid" ASC
+	);
+	CREATE INDEX IF NOT EXISTS "created_at_index" ON "commands" (
+		"created_at" ASC
 	);
 	`
 	_, err := cs.db.ExecContext(ctx, query)
@@ -147,11 +147,15 @@ func (cs *commandStoreSQLite) Create(ctx context.Context, opts ...comby.CommandS
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
 
-	// prepare statement
 	query := `INSERT INTO commands (
-		instance_id, 
-		uuid, 
+		instance_id,
+		uuid,
 		tenant_uuid,
 		domain,
 		created_at,
@@ -159,14 +163,10 @@ func (cs *commandStoreSQLite) Create(ctx context.Context, opts ...comby.CommandS
 		data_bytes,
 		req_ctx
 	) VALUES (?,?,?,?,?,?,?,?);`
-	stmt, err := tx.Prepare(query)
-	if err != nil {
-		return err
-	}
 
-	// execute statement
-	_, err = stmt.ExecContext(
+	_, err = tx.ExecContext(
 		ctx,
+		query,
 		dbRecord.InstanceId,
 		dbRecord.Uuid,
 		dbRecord.TenantUuid,
@@ -180,13 +180,6 @@ func (cs *commandStoreSQLite) Create(ctx context.Context, opts ...comby.CommandS
 		return err
 	}
 
-	// close statement
-	err = stmt.Close()
-	if err != nil {
-		return err
-	}
-
-	// commit statement
 	return tx.Commit()
 }
 
@@ -198,14 +191,14 @@ func (cs *commandStoreSQLite) Get(ctx context.Context, opts ...comby.CommandStor
 		}
 	}
 
-	// prepare query
-	var query string = "SELECT * FROM commands LIMIT 1;"
-	if len(getOpts.CommandUuid) > 0 {
-		query = fmt.Sprintf("SELECT * FROM commands WHERE uuid='%s' LIMIT 1;", getOpts.CommandUuid)
+	if len(getOpts.CommandUuid) == 0 {
+		return nil, fmt.Errorf("'%s' failed to get command - command uuid is required", cs.String())
 	}
 
-	// run query (no args to not using prepared statement)
-	row := cs.db.QueryRowContext(ctx, query)
+	query := `SELECT id, instance_id, uuid, tenant_uuid, domain, created_at,
+		data_type, data_bytes, req_ctx
+		FROM commands WHERE uuid=? LIMIT 1;`
+	row := cs.db.QueryRowContext(ctx, query, getOpts.CommandUuid)
 	if row.Err() != nil {
 		return nil, row.Err()
 	}
@@ -262,28 +255,28 @@ func (cs *commandStoreSQLite) List(ctx context.Context, opts ...comby.CommandSto
 		}
 	}
 
-	// prepare statement: (do NOT used them for Query/QueryContext)
-	// 1. see different syntax for postgres:
-	// http://go-database-sql.org/prepared.html#parameter-placeholder-syntax
-	// 2. db.Query and db.QueryContext for some reason it does not work as expected
-	// (seems to be something internally in database/sql because for SQLite and Postgres
-	// simply does not return the expected result after sending new values to prepared statement)
 	var whereSQL string = ""
 	var whereList []string = []string{}
+	var args []any
 	if len(listOpts.TenantUuid) > 0 {
-		whereList = append(whereList, fmt.Sprintf("tenant_uuid='%s'", listOpts.TenantUuid))
+		whereList = append(whereList, "tenant_uuid=?")
+		args = append(args, listOpts.TenantUuid)
 	}
 	if len(listOpts.Domain) > 0 {
-		whereList = append(whereList, fmt.Sprintf("domain='%s'", listOpts.Domain))
+		whereList = append(whereList, "domain=?")
+		args = append(args, listOpts.Domain)
 	}
 	if len(listOpts.DataType) > 0 {
-		whereList = append(whereList, fmt.Sprintf("data_type='%s'", listOpts.DataType))
+		whereList = append(whereList, "data_type=?")
+		args = append(args, listOpts.DataType)
 	}
 	if listOpts.Before >= 0 {
-		whereList = append(whereList, fmt.Sprintf("created_at<%d", listOpts.Before))
+		whereList = append(whereList, "created_at<?")
+		args = append(args, listOpts.Before)
 	}
 	if listOpts.After >= 0 {
-		whereList = append(whereList, fmt.Sprintf("created_at>%d", listOpts.After))
+		whereList = append(whereList, "created_at>?")
+		args = append(args, listOpts.After)
 	}
 
 	// note the first empty character(s) below
@@ -298,7 +291,12 @@ func (cs *commandStoreSQLite) List(ctx context.Context, opts ...comby.CommandSto
 	// count the total number of records for this query
 	var queryTotal int64
 	var queryTotalQuery string = fmt.Sprintf("SELECT COUNT(id) FROM commands%s;", whereSQL)
-	row := cs.db.QueryRowContext(ctx, queryTotalQuery)
+	var row *sql.Row
+	if len(args) > 0 {
+		row = cs.db.QueryRowContext(ctx, queryTotalQuery, args...)
+	} else {
+		row = cs.db.QueryRowContext(ctx, queryTotalQuery)
+	}
 	if err := row.Err(); err != nil {
 		return nil, 0, err
 	}
@@ -327,9 +325,14 @@ func (cs *commandStoreSQLite) List(ctx context.Context, opts ...comby.CommandSto
 		offsetSQL = fmt.Sprintf(" OFFSET %d", listOpts.Offset)
 	}
 
-	// run query (no args to not using prepared statement - see above for more info)
-	var query string = fmt.Sprintf("SELECT * FROM commands%s%s%s%s;", whereSQL, orderBySQL, limitSQL, offsetSQL)
-	rows, err := cs.db.QueryContext(ctx, query)
+	var query string = fmt.Sprintf("SELECT id, instance_id, uuid, tenant_uuid, domain, created_at, data_type, data_bytes, req_ctx FROM commands%s%s%s%s;", whereSQL, orderBySQL, limitSQL, offsetSQL)
+	var rows *sql.Rows
+	var err error
+	if len(args) > 0 {
+		rows, err = cs.db.QueryContext(ctx, query, args...)
+	} else {
+		rows, err = cs.db.QueryContext(ctx, query)
+	}
 	switch {
 	case err == sql.ErrNoRows:
 		return nil, queryTotal, nil
@@ -421,10 +424,14 @@ func (cs *commandStoreSQLite) Update(ctx context.Context, opts ...comby.CommandS
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
 
-	// prepare statement
 	query := `UPDATE commands SET
-		instance_id=?, 
+		instance_id=?,
 		tenant_uuid=?,
 		domain=?,
 		created_at=?,
@@ -432,13 +439,9 @@ func (cs *commandStoreSQLite) Update(ctx context.Context, opts ...comby.CommandS
 		data_bytes=?,
 		req_ctx=?
 	 WHERE uuid=?;`
-	stmt, err := tx.Prepare(query)
-	if err != nil {
-		return err
-	}
 
-	// execute statement
-	_, err = stmt.ExecContext(ctx,
+	_, err = tx.ExecContext(ctx,
+		query,
 		dbRecord.InstanceId,
 		dbRecord.TenantUuid,
 		dbRecord.Domain,
@@ -451,13 +454,6 @@ func (cs *commandStoreSQLite) Update(ctx context.Context, opts ...comby.CommandS
 		return err
 	}
 
-	// close statement
-	err = stmt.Close()
-	if err != nil {
-		return err
-	}
-
-	// commit statement
 	return tx.Commit()
 }
 
@@ -476,9 +472,7 @@ func (cs *commandStoreSQLite) Delete(ctx context.Context, opts ...comby.CommandS
 		return fmt.Errorf("'%s' failed to delete command - command uuid '%s' is invalid", cs.String(), commandUuid)
 	}
 
-	// run query (no args to not using prepared statement)
-	query := fmt.Sprintf("DELETE FROM commands WHERE uuid='%s';", commandUuid)
-	_, err := cs.db.ExecContext(ctx, query)
+	_, err := cs.db.ExecContext(ctx, "DELETE FROM commands WHERE uuid=?;", commandUuid)
 	return err
 }
 
@@ -509,9 +503,7 @@ func (cs *commandStoreSQLite) String() string {
 
 func (cs *commandStoreSQLite) Info(ctx context.Context) (*comby.CommandStoreInfoModel, error) {
 
-	// run extra total query (no args to not using prepared statement)
-	var totalQuery string = fmt.Sprintf("SELECT COUNT(uuid) FROM commands;")
-	row := cs.db.QueryRowContext(ctx, totalQuery)
+	row := cs.db.QueryRowContext(ctx, "SELECT COUNT(uuid) FROM commands;")
 	if err := row.Err(); err != nil {
 		return nil, err
 	}
@@ -521,9 +513,7 @@ func (cs *commandStoreSQLite) Info(ctx context.Context) (*comby.CommandStoreInfo
 		return nil, err
 	}
 
-	// run extra total query (no args to not using prepared statement)
-	var lastEventQuery string = fmt.Sprintf("SELECT COALESCE(MAX(created_at), 0) FROM commands;")
-	row = cs.db.QueryRowContext(ctx, lastEventQuery)
+	row = cs.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(created_at), 0) FROM commands;")
 	if err := row.Err(); err != nil {
 		return nil, err
 	}
