@@ -25,3 +25,4 @@ go.sum
 
 # Other
 .DS_Store
+.claude

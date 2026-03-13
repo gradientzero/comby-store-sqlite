@@ -2,10 +2,9 @@ module github.com/gradientzero/comby-store-sqlite
 
 go 1.22.0
 
-replace github.com/gradientzero/comby/v2 v2.3.0 => /Users/me/Documents/gradient0/repos/comby/comby
 
 require (
-	github.com/gradientzero/comby/v2 v2.3.0
+	github.com/gradientzero/comby/v2 v2.15.0
 	modernc.org/sqlite v1.28.0
 )
 
@@ -30,3 +29,5 @@ require (
 	modernc.org/strutil v1.1.3 // indirect
 	modernc.org/token v1.0.1 // indirect
 )
+
+replace github.com/gradientzero/comby/v2 v2.15.0 => ../comby

@@ -75,6 +75,7 @@ func (es *eventStoreSQLite) migrate(ctx context.Context) error {
 		created_at INTEGER,
 		data_type TEXT,
 		data_bytes TEXT,
+		req_ctx TEXT,
 		PRIMARY KEY (id)
 	);
 	CREATE INDEX IF NOT EXISTS "tenant_index" ON "events" (
@@ -90,8 +91,24 @@ func (es *eventStoreSQLite) migrate(ctx context.Context) error {
 		"uuid" ASC
 	);
 	`
-	_, err := es.db.ExecContext(ctx, query)
-	return err
+	if _, err := es.db.ExecContext(ctx, query); err != nil {
+		return err
+	}
+
+	// migrate existing databases: add req_ctx column if it doesn't exist
+	// SQLite silently ignores ALTER TABLE ADD COLUMN if column already exists via "IF NOT EXISTS" workaround:
+	// We check PRAGMA table_info and add the column only if missing.
+	var count int
+	if err := es.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='req_ctx'`).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		if _, err := es.db.ExecContext(ctx, `ALTER TABLE events ADD COLUMN req_ctx TEXT`); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // fullfilling EventStore interface
@@ -174,8 +191,9 @@ func (es *eventStoreSQLite) Create(ctx context.Context, opts ...comby.EventStore
 	version,
 	created_at,
 	data_type,
-	data_bytes
-) VALUES (?,?,?,?,?,?,?,?,?,?);`
+	data_bytes,
+	req_ctx
+) VALUES (?,?,?,?,?,?,?,?,?,?,?);`
 
 	_, err = tx.ExecContext(
 		ctx,
@@ -190,6 +208,7 @@ func (es *eventStoreSQLite) Create(ctx context.Context, opts ...comby.EventStore
 		dbRecord.CreatedAt,
 		dbRecord.DataType,
 		dbRecord.DataBytes,
+		dbRecord.ReqCtx,
 	)
 	if err != nil {
 		return err
@@ -211,7 +230,7 @@ func (es *eventStoreSQLite) Get(ctx context.Context, opts ...comby.EventStoreGet
 	}
 
 	query := `SELECT id, instance_id, uuid, tenant_uuid, command_uuid, domain,
-		aggregate_uuid, version, created_at, data_type, data_bytes
+		aggregate_uuid, version, created_at, data_type, data_bytes, COALESCE(req_ctx, '')
 		FROM events WHERE uuid=? LIMIT 1;`
 	row := es.db.QueryRowContext(ctx, query, getOpts.EventUuid)
 	if row.Err() != nil {
@@ -232,6 +251,7 @@ func (es *eventStoreSQLite) Get(ctx context.Context, opts ...comby.EventStoreGet
 		&dbRecord.CreatedAt,
 		&dbRecord.DataType,
 		&dbRecord.DataBytes,
+		&dbRecord.ReqCtx,
 	); err != nil {
 		// Catch errors
 		switch {
@@ -357,7 +377,7 @@ func (es *eventStoreSQLite) List(ctx context.Context, opts ...comby.EventStoreLi
 	}
 
 	// run query with parameterized values
-	var query string = fmt.Sprintf("SELECT id, instance_id, uuid, tenant_uuid, command_uuid, domain, aggregate_uuid, version, created_at, data_type, data_bytes FROM events%s%s%s%s;", whereSQL, orderBySQL, limitSQL, offsetSQL)
+	var query string = fmt.Sprintf("SELECT id, instance_id, uuid, tenant_uuid, command_uuid, domain, aggregate_uuid, version, created_at, data_type, data_bytes, COALESCE(req_ctx, '') FROM events%s%s%s%s;", whereSQL, orderBySQL, limitSQL, offsetSQL)
 	var rows *sql.Rows
 	var err error
 	if len(args) > 0 {
@@ -391,6 +411,7 @@ func (es *eventStoreSQLite) List(ctx context.Context, opts ...comby.EventStoreLi
 			&dbRecord.CreatedAt,
 			&dbRecord.DataType,
 			&dbRecord.DataBytes,
+			&dbRecord.ReqCtx,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -474,7 +495,8 @@ func (es *eventStoreSQLite) Update(ctx context.Context, opts ...comby.EventStore
 		version=?,
 		created_at=?,
 		data_type=?,
-		data_bytes=?
+		data_bytes=?,
+		req_ctx=?
 	 WHERE uuid=?;`
 
 	_, err = tx.ExecContext(ctx,
@@ -488,6 +510,7 @@ func (es *eventStoreSQLite) Update(ctx context.Context, opts ...comby.EventStore
 		dbRecord.CreatedAt,
 		dbRecord.DataType,
 		dbRecord.DataBytes,
+		dbRecord.ReqCtx,
 		dbRecord.Uuid)
 	if err != nil {
 		return err
