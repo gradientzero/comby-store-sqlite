@@ -4,23 +4,47 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/gradientzero/comby/v2"
 	_ "modernc.org/sqlite"
 )
 
+// SnapshotStoreSQLiteOption configures the SQLite snapshot store.
+type SnapshotStoreSQLiteOption func(*snapshotStoreSQLiteConfig)
+
+type snapshotStoreSQLiteConfig struct {
+	MaxOpenConns    int
+	ConnMaxIdleTime time.Duration
+}
+
+// SnapshotStoreSQLiteWithMaxOpenConns sets the maximum number of open connections.
+func SnapshotStoreSQLiteWithMaxOpenConns(n int) SnapshotStoreSQLiteOption {
+	return func(c *snapshotStoreSQLiteConfig) { c.MaxOpenConns = n }
+}
+
+// SnapshotStoreSQLiteWithConnMaxIdleTime sets the maximum connection idle time.
+func SnapshotStoreSQLiteWithConnMaxIdleTime(d time.Duration) SnapshotStoreSQLiteOption {
+	return func(c *snapshotStoreSQLiteConfig) { c.ConnMaxIdleTime = d }
+}
+
 // Make sure it implements interfaces
 var _ comby.SnapshotStore = (*snapshotStoreSQLite)(nil)
 
 type snapshotStoreSQLite struct {
-	db   *sql.DB
-	path string
+	db     *sql.DB
+	config snapshotStoreSQLiteConfig
+	path   string
 }
 
-func NewSnapshotStoreSQLite(path string) comby.SnapshotStore {
-	return &snapshotStoreSQLite{
+func NewSnapshotStoreSQLite(path string, opts ...SnapshotStoreSQLiteOption) comby.SnapshotStore {
+	s := &snapshotStoreSQLite{
 		path: path,
 	}
+	for _, opt := range opts {
+		opt(&s.config)
+	}
+	return s
 }
 
 func (s *snapshotStoreSQLite) connect(ctx context.Context) (*sql.DB, error) {
@@ -29,7 +53,17 @@ func (s *snapshotStoreSQLite) connect(ctx context.Context) (*sql.DB, error) {
 		return nil, err
 	}
 
-	db.SetMaxOpenConns(1)
+	maxOpenConns := 1
+	if s.config.MaxOpenConns > 0 {
+		maxOpenConns = s.config.MaxOpenConns
+	}
+	db.SetMaxOpenConns(maxOpenConns)
+
+	if s.config.ConnMaxIdleTime > 0 {
+		db.SetConnMaxIdleTime(s.config.ConnMaxIdleTime)
+	} else {
+		db.SetConnMaxIdleTime(5 * time.Minute)
+	}
 
 	query := `
 	PRAGMA journal_mode=WAL;

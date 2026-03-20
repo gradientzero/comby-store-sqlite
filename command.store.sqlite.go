@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/gradientzero/comby-store-sqlite/internal"
 	"github.com/gradientzero/comby/v2"
@@ -42,7 +43,25 @@ func (cs *commandStoreSQLite) connect(ctx context.Context) (*sql.DB, error) {
 		return nil, err
 	}
 	// WAL mode allows concurrent readers while a single writer holds the lock.
-	db.SetMaxOpenConns(100)
+	maxOpenConns := 10
+	if cs.options.MaxOpenConns > 0 {
+		maxOpenConns = cs.options.MaxOpenConns
+	}
+	db.SetMaxOpenConns(maxOpenConns)
+
+	if cs.options.MaxIdleConns > 0 {
+		db.SetMaxIdleConns(cs.options.MaxIdleConns)
+	}
+
+	if cs.options.ConnMaxIdleTime > 0 {
+		db.SetConnMaxIdleTime(cs.options.ConnMaxIdleTime)
+	} else {
+		db.SetConnMaxIdleTime(5 * time.Minute)
+	}
+
+	if cs.options.ConnMaxLifetime > 0 {
+		db.SetConnMaxLifetime(cs.options.ConnMaxLifetime)
+	}
 
 	// set sqlite specific pragmas
 	query := `

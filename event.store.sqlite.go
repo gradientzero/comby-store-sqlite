@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gradientzero/comby-store-sqlite/internal"
 	"github.com/gradientzero/comby/v2"
@@ -47,7 +48,25 @@ func (es *eventStoreSQLite) connect(ctx context.Context) (*sql.DB, error) {
 	// This is critical for readmodel restore where multiple goroutines read
 	// from the event store in parallel. We allow multiple connections so
 	// database/sql can serve concurrent reads without queuing.
-	db.SetMaxOpenConns(100)
+	maxOpenConns := 10
+	if es.options.MaxOpenConns > 0 {
+		maxOpenConns = es.options.MaxOpenConns
+	}
+	db.SetMaxOpenConns(maxOpenConns)
+
+	if es.options.MaxIdleConns > 0 {
+		db.SetMaxIdleConns(es.options.MaxIdleConns)
+	}
+
+	if es.options.ConnMaxIdleTime > 0 {
+		db.SetConnMaxIdleTime(es.options.ConnMaxIdleTime)
+	} else {
+		db.SetConnMaxIdleTime(5 * time.Minute)
+	}
+
+	if es.options.ConnMaxLifetime > 0 {
+		db.SetConnMaxLifetime(es.options.ConnMaxLifetime)
+	}
 
 	// set sqlite specific pragmas
 	query := `
