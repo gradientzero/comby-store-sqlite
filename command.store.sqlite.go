@@ -83,6 +83,7 @@ func (cs *commandStoreSQLite) migrate(ctx context.Context) error {
 		instance_id INTEGER,
 		uuid TEXT,
 		tenant_uuid TEXT,
+		workspace_uuid TEXT,
 		domain TEXT,
 		created_at INTEGER,
 		data_type TEXT,
@@ -93,6 +94,9 @@ func (cs *commandStoreSQLite) migrate(ctx context.Context) error {
 	CREATE INDEX IF NOT EXISTS "tenant_index" ON "commands" (
 		"tenant_uuid" ASC
 	);
+	CREATE INDEX IF NOT EXISTS "workspace_index" ON "commands" (
+		"workspace_uuid" ASC
+	);
 	CREATE UNIQUE INDEX IF NOT EXISTS "uuid_index" ON "commands" (
 		"uuid" ASC
 	);
@@ -100,8 +104,20 @@ func (cs *commandStoreSQLite) migrate(ctx context.Context) error {
 		"created_at" ASC
 	);
 	`
-	_, err := cs.db.ExecContext(ctx, query)
-	return err
+	if _, err := cs.db.ExecContext(ctx, query); err != nil {
+		return err
+	}
+	// migrate existing databases: add workspace_uuid column if it doesn't exist
+	var count int
+	if err := cs.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('commands') WHERE name='workspace_uuid'`).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		if _, err := cs.db.ExecContext(ctx, `ALTER TABLE commands ADD COLUMN workspace_uuid TEXT`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // fullfilling CommandStore interface
@@ -176,12 +192,13 @@ func (cs *commandStoreSQLite) Create(ctx context.Context, opts ...comby.CommandS
 		instance_id,
 		uuid,
 		tenant_uuid,
+		workspace_uuid,
 		domain,
 		created_at,
 		data_type,
 		data_bytes,
 		req_ctx
-	) VALUES (?,?,?,?,?,?,?,?);`
+	) VALUES (?,?,?,?,?,?,?,?,?);`
 
 	_, err = tx.ExecContext(
 		ctx,
@@ -189,6 +206,7 @@ func (cs *commandStoreSQLite) Create(ctx context.Context, opts ...comby.CommandS
 		dbRecord.InstanceId,
 		dbRecord.Uuid,
 		dbRecord.TenantUuid,
+		dbRecord.WorkspaceUuid,
 		dbRecord.Domain,
 		dbRecord.CreatedAt,
 		dbRecord.DataType,
@@ -214,7 +232,7 @@ func (cs *commandStoreSQLite) Get(ctx context.Context, opts ...comby.CommandStor
 		return nil, fmt.Errorf("'%s' failed to get command - command uuid is required", cs.String())
 	}
 
-	query := `SELECT id, instance_id, uuid, tenant_uuid, domain, created_at,
+	query := `SELECT id, instance_id, uuid, tenant_uuid, COALESCE(workspace_uuid, ''), domain, created_at,
 		data_type, data_bytes, req_ctx
 		FROM commands WHERE uuid=? LIMIT 1;`
 	row := cs.db.QueryRowContext(ctx, query, getOpts.CommandUuid)
@@ -229,6 +247,7 @@ func (cs *commandStoreSQLite) Get(ctx context.Context, opts ...comby.CommandStor
 		&dbRecord.InstanceId,
 		&dbRecord.Uuid,
 		&dbRecord.TenantUuid,
+		&dbRecord.WorkspaceUuid,
 		&dbRecord.Domain,
 		&dbRecord.CreatedAt,
 		&dbRecord.DataType,
@@ -344,7 +363,7 @@ func (cs *commandStoreSQLite) List(ctx context.Context, opts ...comby.CommandSto
 		offsetSQL = fmt.Sprintf(" OFFSET %d", listOpts.Offset)
 	}
 
-	var query string = fmt.Sprintf("SELECT id, instance_id, uuid, tenant_uuid, domain, created_at, data_type, data_bytes, req_ctx FROM commands%s%s%s%s;", whereSQL, orderBySQL, limitSQL, offsetSQL)
+	var query string = fmt.Sprintf("SELECT id, instance_id, uuid, tenant_uuid, COALESCE(workspace_uuid, ''), domain, created_at, data_type, data_bytes, req_ctx FROM commands%s%s%s%s;", whereSQL, orderBySQL, limitSQL, offsetSQL)
 	var rows *sql.Rows
 	var err error
 	if len(args) > 0 {
@@ -371,6 +390,7 @@ func (cs *commandStoreSQLite) List(ctx context.Context, opts ...comby.CommandSto
 			&dbRecord.InstanceId,
 			&dbRecord.Uuid,
 			&dbRecord.TenantUuid,
+			&dbRecord.WorkspaceUuid,
 			&dbRecord.Domain,
 			&dbRecord.CreatedAt,
 			&dbRecord.DataType,
@@ -452,6 +472,7 @@ func (cs *commandStoreSQLite) Update(ctx context.Context, opts ...comby.CommandS
 	query := `UPDATE commands SET
 		instance_id=?,
 		tenant_uuid=?,
+		workspace_uuid=?,
 		domain=?,
 		created_at=?,
 		data_type=?,
@@ -463,6 +484,7 @@ func (cs *commandStoreSQLite) Update(ctx context.Context, opts ...comby.CommandS
 		query,
 		dbRecord.InstanceId,
 		dbRecord.TenantUuid,
+		dbRecord.WorkspaceUuid,
 		dbRecord.Domain,
 		dbRecord.CreatedAt,
 		dbRecord.DataType,
