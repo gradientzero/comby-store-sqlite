@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/gradientzero/comby-store-sqlite/internal"
-	"github.com/gradientzero/comby/v2"
+	"github.com/gradientzero/comby/v3"
 	_ "modernc.org/sqlite"
 )
 

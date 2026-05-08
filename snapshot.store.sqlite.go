@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/gradientzero/comby/v2"
+	"github.com/gradientzero/comby/v3"
 	_ "modernc.org/sqlite"
 )
 
