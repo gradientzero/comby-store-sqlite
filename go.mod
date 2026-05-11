@@ -29,4 +29,4 @@ require (
 	modernc.org/token v1.0.1 // indirect
 )
 
-replace github.com/gradientzero/comby/v3 => /Users/me/Documents/gradient0/repos/comby/comby
+replace github.com/gradientzero/comby/v3 => ../comby

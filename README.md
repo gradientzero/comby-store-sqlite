@@ -12,7 +12,7 @@ Implementation of the EventStore and CommandStore interfaces defined in [comby](
 
 ## Installation
 
-*comby-store-sqlite* supports the latest version of comby (v2), requires Go version 1.22+ and is based on SQLite driver [modernc.org/sqlite](https://gitlab.com/cznic/sqlite).
+*comby-store-sqlite* supports the latest version of comby (v3), requires Go version 1.22+ and is based on SQLite driver [modernc.org/sqlite](https://gitlab.com/cznic/sqlite).
 
 ```shell
 go get github.com/gradientzero/comby-store-sqlite
@@ -23,7 +23,7 @@ go get github.com/gradientzero/comby-store-sqlite
 ```go
 import (
 	"github.com/gradientzero/comby-store-sqlite"
-	"github.com/gradientzero/comby/v2"
+	"github.com/gradientzero/comby/v3"
 )
 
 // create sqlite CommandStore
