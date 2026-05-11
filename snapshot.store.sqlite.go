@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/gradientzero/comby/v2"
+	"github.com/gradientzero/comby/v3"
 	_ "modernc.org/sqlite"
 )
 
@@ -80,14 +80,32 @@ func (s *snapshotStoreSQLite) migrate(ctx context.Context) error {
 	query := `
 	CREATE TABLE IF NOT EXISTS snapshots (
 		aggregate_uuid TEXT PRIMARY KEY,
+		tenant_uuid TEXT,
+		workspace_uuid TEXT,
 		domain TEXT NOT NULL,
 		version INTEGER NOT NULL,
 		data BLOB NOT NULL,
 		created_at INTEGER NOT NULL
 	);
+	CREATE INDEX IF NOT EXISTS "snapshots_tenant_index" ON "snapshots" ("tenant_uuid" ASC);
+	CREATE INDEX IF NOT EXISTS "snapshots_workspace_index" ON "snapshots" ("workspace_uuid" ASC);
 	`
-	_, err := s.db.ExecContext(ctx, query)
-	return err
+	if _, err := s.db.ExecContext(ctx, query); err != nil {
+		return err
+	}
+	// migrate existing databases: add tenant_uuid + workspace_uuid columns if they don't exist
+	for _, col := range []string{"tenant_uuid", "workspace_uuid"} {
+		var count int
+		if err := s.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM pragma_table_info('snapshots') WHERE name='%s'`, col)).Scan(&count); err != nil {
+			return err
+		}
+		if count == 0 {
+			if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE snapshots ADD COLUMN %s TEXT`, col)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (s *snapshotStoreSQLite) Init(ctx context.Context) error {
@@ -108,9 +126,11 @@ func (s *snapshotStoreSQLite) Save(ctx context.Context, model *comby.SnapshotSto
 		return fmt.Errorf("snapshot model is nil")
 	}
 
-	query := `INSERT INTO snapshots (aggregate_uuid, domain, version, data, created_at)
-		VALUES (?, ?, ?, ?, ?)
+	query := `INSERT INTO snapshots (aggregate_uuid, tenant_uuid, workspace_uuid, domain, version, data, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(aggregate_uuid) DO UPDATE SET
+			tenant_uuid=excluded.tenant_uuid,
+			workspace_uuid=excluded.workspace_uuid,
 			domain=excluded.domain,
 			version=excluded.version,
 			data=excluded.data,
@@ -118,6 +138,8 @@ func (s *snapshotStoreSQLite) Save(ctx context.Context, model *comby.SnapshotSto
 
 	_, err := s.db.ExecContext(ctx, query,
 		model.AggregateUuid,
+		model.TenantUuid,
+		model.WorkspaceUuid,
 		model.Domain,
 		model.Version,
 		model.Data,
@@ -127,7 +149,7 @@ func (s *snapshotStoreSQLite) Save(ctx context.Context, model *comby.SnapshotSto
 }
 
 func (s *snapshotStoreSQLite) GetLatest(ctx context.Context, aggregateUuid string) (*comby.SnapshotStoreModel, error) {
-	query := `SELECT aggregate_uuid, domain, version, data, created_at
+	query := `SELECT aggregate_uuid, COALESCE(tenant_uuid, ''), COALESCE(workspace_uuid, ''), domain, version, data, created_at
 		FROM snapshots WHERE aggregate_uuid=? LIMIT 1;`
 
 	row := s.db.QueryRowContext(ctx, query, aggregateUuid)
@@ -135,6 +157,8 @@ func (s *snapshotStoreSQLite) GetLatest(ctx context.Context, aggregateUuid strin
 	var model comby.SnapshotStoreModel
 	if err := row.Scan(
 		&model.AggregateUuid,
+		&model.TenantUuid,
+		&model.WorkspaceUuid,
 		&model.Domain,
 		&model.Version,
 		&model.Data,

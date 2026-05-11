@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	store "github.com/gradientzero/comby-store-sqlite"
-	"github.com/gradientzero/comby/v2"
+	"github.com/gradientzero/comby/v3"
 )
 
 func TestSnapshotStoreSQLite_SaveAndGetLatest(t *testing.T) {

@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/gradientzero/comby-store-sqlite/internal"
-	"github.com/gradientzero/comby/v2"
+	"github.com/gradientzero/comby/v3"
 	_ "modernc.org/sqlite"
 )
 
@@ -87,6 +87,7 @@ func (es *eventStoreSQLite) migrate(ctx context.Context) error {
 		instance_id INTEGER,
 		uuid TEXT,
 		tenant_uuid TEXT,
+		workspace_uuid TEXT,
 		command_uuid TEXT,
 		domain TEXT,
 		aggregate_uuid TEXT,
@@ -99,6 +100,9 @@ func (es *eventStoreSQLite) migrate(ctx context.Context) error {
 	);
 	CREATE INDEX IF NOT EXISTS "tenant_index" ON "events" (
 		"tenant_uuid" ASC
+	);
+	CREATE INDEX IF NOT EXISTS "workspace_index" ON "events" (
+		"workspace_uuid" ASC
 	);
 	CREATE INDEX IF NOT EXISTS "aggregate_uuid_index" ON "events" (
 		"aggregate_uuid" ASC
@@ -123,6 +127,16 @@ func (es *eventStoreSQLite) migrate(ctx context.Context) error {
 	}
 	if count == 0 {
 		if _, err := es.db.ExecContext(ctx, `ALTER TABLE events ADD COLUMN req_ctx TEXT`); err != nil {
+			return err
+		}
+	}
+
+	// migrate existing databases: add workspace_uuid column if it doesn't exist
+	if err := es.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='workspace_uuid'`).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		if _, err := es.db.ExecContext(ctx, `ALTER TABLE events ADD COLUMN workspace_uuid TEXT`); err != nil {
 			return err
 		}
 	}
@@ -204,6 +218,7 @@ func (es *eventStoreSQLite) Create(ctx context.Context, opts ...comby.EventStore
 	instance_id,
 	uuid,
 	tenant_uuid,
+	workspace_uuid,
 	command_uuid,
 	domain,
 	aggregate_uuid,
@@ -212,7 +227,7 @@ func (es *eventStoreSQLite) Create(ctx context.Context, opts ...comby.EventStore
 	data_type,
 	data_bytes,
 	req_ctx
-) VALUES (?,?,?,?,?,?,?,?,?,?,?);`
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?);`
 
 	_, err = tx.ExecContext(
 		ctx,
@@ -220,6 +235,7 @@ func (es *eventStoreSQLite) Create(ctx context.Context, opts ...comby.EventStore
 		dbRecord.InstanceId,
 		dbRecord.Uuid,
 		dbRecord.TenantUuid,
+		dbRecord.WorkspaceUuid,
 		dbRecord.CommandUuid,
 		dbRecord.Domain,
 		dbRecord.AggregateUuid,
@@ -248,7 +264,7 @@ func (es *eventStoreSQLite) Get(ctx context.Context, opts ...comby.EventStoreGet
 		return nil, fmt.Errorf("'%s' failed to get event - event uuid is required", es.String())
 	}
 
-	query := `SELECT id, instance_id, uuid, tenant_uuid, command_uuid, domain,
+	query := `SELECT id, instance_id, uuid, tenant_uuid, COALESCE(workspace_uuid, ''), command_uuid, domain,
 		aggregate_uuid, version, created_at, data_type, data_bytes, COALESCE(req_ctx, '')
 		FROM events WHERE uuid=? LIMIT 1;`
 	row := es.db.QueryRowContext(ctx, query, getOpts.EventUuid)
@@ -263,6 +279,7 @@ func (es *eventStoreSQLite) Get(ctx context.Context, opts ...comby.EventStoreGet
 		&dbRecord.InstanceId,
 		&dbRecord.Uuid,
 		&dbRecord.TenantUuid,
+		&dbRecord.WorkspaceUuid,
 		&dbRecord.CommandUuid,
 		&dbRecord.Domain,
 		&dbRecord.AggregateUuid,
@@ -396,7 +413,7 @@ func (es *eventStoreSQLite) List(ctx context.Context, opts ...comby.EventStoreLi
 	}
 
 	// run query with parameterized values
-	var query string = fmt.Sprintf("SELECT id, instance_id, uuid, tenant_uuid, command_uuid, domain, aggregate_uuid, version, created_at, data_type, data_bytes, COALESCE(req_ctx, '') FROM events%s%s%s%s;", whereSQL, orderBySQL, limitSQL, offsetSQL)
+	var query string = fmt.Sprintf("SELECT id, instance_id, uuid, tenant_uuid, COALESCE(workspace_uuid, ''), command_uuid, domain, aggregate_uuid, version, created_at, data_type, data_bytes, COALESCE(req_ctx, '') FROM events%s%s%s%s;", whereSQL, orderBySQL, limitSQL, offsetSQL)
 	var rows *sql.Rows
 	var err error
 	if len(args) > 0 {
@@ -423,6 +440,7 @@ func (es *eventStoreSQLite) List(ctx context.Context, opts ...comby.EventStoreLi
 			&dbRecord.InstanceId,
 			&dbRecord.Uuid,
 			&dbRecord.TenantUuid,
+			&dbRecord.WorkspaceUuid,
 			&dbRecord.CommandUuid,
 			&dbRecord.Domain,
 			&dbRecord.AggregateUuid,
@@ -508,6 +526,7 @@ func (es *eventStoreSQLite) Update(ctx context.Context, opts ...comby.EventStore
 	query := `UPDATE events SET
 		instance_id=?,
 		tenant_uuid=?,
+		workspace_uuid=?,
 		command_uuid=?,
 		domain=?,
 		aggregate_uuid=?,
@@ -522,6 +541,7 @@ func (es *eventStoreSQLite) Update(ctx context.Context, opts ...comby.EventStore
 		query,
 		dbRecord.InstanceId,
 		dbRecord.TenantUuid,
+		dbRecord.WorkspaceUuid,
 		dbRecord.CommandUuid,
 		dbRecord.Domain,
 		dbRecord.AggregateUuid,
