@@ -357,6 +357,17 @@ func (es *eventStoreSQLite) List(ctx context.Context, opts ...comby.EventStoreLi
 		}
 		whereList = append(whereList, fmt.Sprintf("domain IN (%s)", strings.Join(placeholders, ",")))
 	}
+	// Strictly greater than, and 0 means "no filter" — the same contract the
+	// in-memory store implements (comby store.event.memory.go) and the same one
+	// EventStoreListOptionWithMinVersion documents. Omitting it here made
+	// snapshot-based aggregate rehydration silently wrong: GetAggregate restores
+	// an aggregate from its snapshot at version N and then asks for the events
+	// AFTER N, so an ignored filter hands it the whole stream from version 1 and
+	// every event before the snapshot is applied a second time on top of it.
+	if listOpts.MinVersion > 0 {
+		whereList = append(whereList, "version>?")
+		args = append(args, listOpts.MinVersion)
+	}
 	if listOpts.Before >= 0 {
 		whereList = append(whereList, "created_at<?")
 		args = append(args, listOpts.Before)
