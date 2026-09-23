@@ -386,21 +386,29 @@ func (es *eventStoreSQLite) List(ctx context.Context, opts ...comby.EventStoreLi
 		}
 	}
 
-	// count the total number of records for this query
-	var queryTotal int64
-	var queryTotalQuery string = fmt.Sprintf("SELECT COUNT(id) FROM events%s;", whereSQL)
-	var row *sql.Row
-	if len(args) > 0 {
-		row = es.db.QueryRowContext(ctx, queryTotalQuery, args...)
-	} else {
-		row = es.db.QueryRowContext(ctx, queryTotalQuery)
-	}
-	if err := row.Err(); err != nil {
-		return nil, 0, err
-	}
-	// extract record
-	if err := row.Scan(&queryTotal); err != nil {
-		return nil, 0, err
+	// count the total number of records for this query — unless the caller said
+	// it will not read the total. The count is a second query over the SAME
+	// predicate, so its cost follows how many rows MATCH rather than how many are
+	// returned: on a paged walk it is charged again for every page, and summed
+	// over the walk that is quadratic in the table while the useful work is
+	// linear. -1 is the agreed "not computed" value (comby
+	// EventStoreListOptionSkipTotal).
+	var queryTotal int64 = -1
+	if !listOpts.SkipTotal {
+		var queryTotalQuery string = fmt.Sprintf("SELECT COUNT(id) FROM events%s;", whereSQL)
+		var row *sql.Row
+		if len(args) > 0 {
+			row = es.db.QueryRowContext(ctx, queryTotalQuery, args...)
+		} else {
+			row = es.db.QueryRowContext(ctx, queryTotalQuery)
+		}
+		if err := row.Err(); err != nil {
+			return nil, 0, err
+		}
+		// extract record
+		if err := row.Scan(&queryTotal); err != nil {
+			return nil, 0, err
+		}
 	}
 
 	// prepare orderby
