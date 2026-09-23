@@ -3,7 +3,7 @@ module github.com/gradientzero/comby-store-sqlite
 go 1.22.0
 
 require (
-	github.com/gradientzero/comby/v3 v3.0.0
+	github.com/gradientzero/comby/v3 v3.3.0
 	modernc.org/sqlite v1.28.0
 )
 
